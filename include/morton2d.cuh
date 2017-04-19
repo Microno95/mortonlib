@@ -31,6 +31,38 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <assert.h>
 #include <immintrin.h>
 
+#ifdef __CUDACC__
+#define CUDA_CALLABLE_MEMBER __host__ __device__
+#define CUDA_CALLABLE_MEMBER_HOST __host__
+#define CUDA_CALLABLE_MEMBER_DEVICE __device__
+
+/*
+Using the serial algorithms described at https://chessprogramming.wikispaces.com/BMI2
+*/
+CUDA_CALLABLE_MEMBER_DEVICE uint64_t _pdep_u64(uint64_t src, uint64_t mask) {
+	uint64_t res = 0;
+	for (uint64_t bb = 1; mask; bb += bb) {
+		if (val & bb) res |= mask & -mask;
+		mask &= mask - 1;
+	}
+	return res;
+}
+
+CUDA_CALLABLE_MEMBER_DEVICE uint64_t _pext_u64(uint64_t src, uint64_t mask) {
+	uint64_t res = 0;
+	for (uint64_t bb = 1; mask; bb += bb) {
+		if ( val & mask & -mask ) res |= bb;
+		mask &= mask - 1;
+	}
+	return res;
+}
+
+#else
+#define CUDA_CALLABLE_MEMBER
+#define CUDA_CALLABLE_MEMBER_HOST
+#define CUDA_CALLABLE_MEMBER_DEVICE
+#endif 
+
 /*
 BMI2(Bit Manipulation Instruction Set 2) is a special set of instructions available for intel core i5, i7(since Haswell architecture) and Xeon E3.
 Some instructions are not available for Microsoft Visual Studio older than 2013.
@@ -40,7 +72,6 @@ Some instructions are not available for Microsoft Visual Studio older than 2013.
 #endif
 
 #ifndef USE_BMI2
-//mortonkey(x+1) = (mortonkey(x) - MAXMORTONKEY) & MAXMORTONKEY
 static const uint32_t morton2dLUT[256] =
 { 0x0000, 0x0001, 0x0004, 0x0005, 0x0010, 0x0011, 0x0014, 0x0015,
   0x0040, 0x0041, 0x0044, 0x0045, 0x0050, 0x0051, 0x0054, 0x0055,
@@ -88,15 +119,14 @@ public:
 
 public:
 
-	inline morton2d() : key(0) {};
-	inline explicit morton2d(T _key) : key(_key) {};
+	CUDA_CALLABLE_MEMBER inline morton2d() : key(0) {};
+	CUDA_CALLABLE_MEMBER inline explicit morton2d(T _key) : key(_key) {};
 
 	/* If BMI2 intrinsics are not available, we rely on a look up table of precomputed morton codes. */
-	inline morton2d(const uint32_t x, const uint32_t y) : key(0) {
-
-#ifdef USE_BMI2
+	CUDA_CALLABLE_MEMBER_HOST inline morton2d(const uint32_t x, const uint32_t y) : key(0) {
+		#ifdef USE_BMI2
 		key = static_cast<T>(_pdep_u64(y, y2_mask) | _pdep_u64(x, x2_mask));
-#else
+		#else
 		key = morton2dLUT[(x >> 24) & 0xFF] << 1 |
 			morton2dLUT[(y >> 24) & 0xFF];
 		key = key << 16 |
@@ -108,59 +138,73 @@ public:
 		key = key << 16 |
 			morton2dLUT[x & 0xFF] << 1 |
 			morton2dLUT[y & 0xFF];
-#endif
+		#endif
 	}
+	
+	#ifdef __CUDACC__
+	CUDA_CALLABLE_MEMBER_DEVICE inline morton2d(const uint32_t x, const uint32_t y) : key(0) {
+		key = static_cast<T>(_pdep_u64(y, y2_mask) | _pdep_u64(x, x2_mask));
+	}
+	#endif
 
-	inline void decode(uint64_t& x, uint64_t& y) const
+	CUDA_CALLABLE_MEMBER_HOST inline void decode(uint64_t& x, uint64_t& y) const
 	{
-#ifdef USE_BMI2
+		#ifdef USE_BMI2
 		x = _pext_u64(this->key, x2_mask);
 		y = _pext_u64(this->key, y2_mask);
-#else
+		#else
 		x = compactBits(this->key >> 1);
 		y = compactBits(this->key);
-#endif
+		#endif
 	}
 
+	#ifdef __CUDACC__
+	CUDA_CALLABLE_MEMBER_DEVICE inline void decode(uint64_t& x, uint64_t& y) const
+	{
+		x = _pext_u64(this->key, x2_mask);
+		y = _pext_u64(this->key, y2_mask);
+	}
+	#endif
+
 	//Binary operators
-	inline bool operator==(const morton2d m1) const
+	CUDA_CALLABLE_MEMBER inline bool operator==(const morton2d m1) const
 	{
 		return this->key == m1.key;
 	}
 
-	inline bool operator!=(const morton2d m1) const
+	CUDA_CALLABLE_MEMBER inline bool operator!=(const morton2d m1) const
 	{
 		return !operator==(m1);
 	}
 
-	inline morton2d operator|(const morton2d m1) const
+	CUDA_CALLABLE_MEMBER inline morton2d operator|(const morton2d m1) const
 	{
 		return morton2d<T>(this->key | m1.key);
 	}
 
-	inline morton2d operator&(const morton2d m1) const
+	CUDA_CALLABLE_MEMBER inline morton2d operator&(const morton2d m1) const
 	{
 		return morton2d<T>(this->key & m1.key);
 	}
 
-	inline morton2d operator >> (const uint64_t d) const
+	CUDA_CALLABLE_MEMBER inline morton2d operator >> (const uint64_t d) const
 	{
 		return morton2d<T>(this->key >> (2 * d));
 	}
 
-	inline morton2d operator<<(const uint64_t d) const
+	CUDA_CALLABLE_MEMBER inline morton2d operator<<(const uint64_t d) const
 	{
 		return morton2d<T>(this->key << (2 * d));
 	}
 
-	inline void operator+=(const morton2d<T> rhs)
+	CUDA_CALLABLE_MEMBER inline void operator+=(const morton2d<T> rhs)
 	{
 		T x_sum = (this->key | y2_mask) + (rhs.key & x2_mask);
 		T y_sum = (this->key | x2_mask) + (rhs.key & y2_mask);
 		this->key = (x_sum & x2_mask) | (y_sum & y2_mask);
 	}
 
-	inline void operator-=(const morton2d<T> rhs)
+	CUDA_CALLABLE_MEMBER inline void operator-=(const morton2d<T> rhs)
 	{
 		T x_diff = (this->key & x2_mask) - (rhs.key & x2_mask);
 		T y_diff = (this->key & y2_mask) - (rhs.key & y2_mask);
@@ -171,25 +215,25 @@ public:
 	morton2(4,5).incX() == morton2(5,5);
 
 	Ref : http://bitmath.blogspot.fr/2012/11/tesseral-arithmetic-useful-snippets.html */
-	inline morton2d incX() const
+	CUDA_CALLABLE_MEMBER inline morton2d incX() const
 	{
 		const T x_sum = static_cast<T>((this->key | y2_mask) + 2);
 		return morton2d<T>((x_sum & x2_mask) | (this->key & y2_mask));
 	}
 
-	inline morton2d incY() const
+	CUDA_CALLABLE_MEMBER inline morton2d incY() const
 	{
 		const T y_sum = static_cast<T>((this->key | x2_mask) + 1);
 		return morton2d<T>((y_sum & y2_mask) | (this->key & x2_mask));
 	}
 
-	inline morton2d decX() const
+	CUDA_CALLABLE_MEMBER inline morton2d decX() const
 	{
 		const T x_diff = static_cast<T>((this->key & x2_mask) - 2);
 		return morton2d<T>((x_diff & x2_mask) | (this->key & y2_mask));
 	}
 
-	inline morton2d decY() const
+	CUDA_CALLABLE_MEMBER inline morton2d decY() const
 	{
 		const T y_diff = static_cast<T>((this->key & y2_mask) - 1);
 		return morton2d<T>((y_diff & y2_mask) | (this->key & x2_mask));
@@ -199,7 +243,7 @@ public:
 	  min(morton2(4,5), morton2(8,3)) == morton2(4,3);
 	  Ref : http://asgerhoedt.dk/?p=276
 	*/
-	static inline morton2d min(const morton2d lhs, const morton2d rhs)
+	CUDA_CALLABLE_MEMBER static inline morton2d min(const morton2d lhs, const morton2d rhs)
 	{
 		T lhsX = lhs.key & x2_mask;
 		T rhsX = rhs.key & x2_mask;
@@ -211,7 +255,7 @@ public:
 	/*
 	  max(morton2(4,5), morton2(8,3)) == morton2(8,5);
 	*/
-	static inline morton2d max(const morton2d lhs, const morton2d rhs)
+	CUDA_CALLABLE_MEMBER static inline morton2d max(const morton2d lhs, const morton2d rhs)
 	{
 		T lhsX = lhs.key & x2_mask;
 		T rhsX = rhs.key & x2_mask;
@@ -226,7 +270,7 @@ public:
 	This does not work for values greater than 256.
 
 	This function takes roughly the same time as a full encode (64 bits) using BMI2 intrinsic.*/
-	static inline morton2d morton2d_256(const uint32_t x, const uint32_t y)
+	CUDA_CALLABLE_MEMBER static inline morton2d morton2d_256(const uint32_t x, const uint32_t y)
 	{
 		assert(x < 256 && y < 256);
 		T key = morton2dLUT[x] << 1 |
@@ -235,7 +279,7 @@ public:
 	}
 
 private:
-	inline uint64_t compactBits(uint64_t n) const
+	CUDA_CALLABLE_MEMBER inline uint64_t compactBits(uint64_t n) const
 	{
 		n &= 0x5555555555555555;
 		n = (n ^ (n >> 1)) & 0x3333333333333333;
@@ -252,7 +296,7 @@ private:
 /* Add two morton keys (xy interleaving)
 morton2(4,5) + morton3(1,2) == morton2(5,7); */
 template<class T>
-inline morton2d<T> operator+(const morton2d<T> lhs, const morton2d<T> rhs)
+CUDA_CALLABLE_MEMBER inline morton2d<T> operator+(const morton2d<T> lhs, const morton2d<T> rhs)
 {
 	T x_sum = (lhs.key | y2_mask) + (rhs.key & x2_mask);
 	T y_sum = (lhs.key | x2_mask) + (rhs.key & y2_mask);
@@ -262,7 +306,7 @@ inline morton2d<T> operator+(const morton2d<T> lhs, const morton2d<T> rhs)
 /* Substract two mortons keys (xy interleaving)
   morton2(4,5) - morton2(1,2) == morton2(3,3); */
 template<class T>
-inline morton2d<T> operator-(const morton2d<T> lhs, const morton2d<T> rhs)
+CUDA_CALLABLE_MEMBER inline morton2d<T> operator-(const morton2d<T> lhs, const morton2d<T> rhs)
 {
 	T x_diff = (lhs.key & x2_mask) - (rhs.key & x2_mask);
 	T y_diff = (lhs.key & y2_mask) - (rhs.key & y2_mask);
@@ -270,31 +314,31 @@ inline morton2d<T> operator-(const morton2d<T> lhs, const morton2d<T> rhs)
 }
 
 template<class T>
-inline bool operator< (const morton2d<T>& lhs, const morton2d<T>& rhs)
+CUDA_CALLABLE_MEMBER inline bool operator< (const morton2d<T>& lhs, const morton2d<T>& rhs)
 {
 	return (lhs.key) < (rhs.key);
 }
 
 template<class T>
-inline bool operator> (const morton2d<T>& lhs, const morton2d<T>& rhs)
+CUDA_CALLABLE_MEMBER inline bool operator> (const morton2d<T>& lhs, const morton2d<T>& rhs)
 {
 	return (lhs.key) > (rhs.key);
 }
 
 template<class T>
-inline bool operator>= (const morton2d<T>& lhs, const morton2d<T>& rhs)
+CUDA_CALLABLE_MEMBER inline bool operator>= (const morton2d<T>& lhs, const morton2d<T>& rhs)
 {
 	return (lhs.key) >= (rhs.key);
 }
 
 template<class T>
-inline bool operator<= (const morton2d<T>& lhs, const morton2d<T>& rhs)
+CUDA_CALLABLE_MEMBER inline bool operator<= (const morton2d<T>& lhs, const morton2d<T>& rhs)
 {
 	return (lhs.key) <= (rhs.key);
 }
 
 template<class T>
-std::ostream& operator<<(std::ostream& os, const morton2d<T>& m)
+CUDA_CALLABLE_MEMBER_HOST std::ostream& operator<<(std::ostream& os, const morton2d<T>& m)
 {
 	uint64_t x, y;
 	m.decode(x, y);

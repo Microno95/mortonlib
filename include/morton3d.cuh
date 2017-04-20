@@ -36,19 +36,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 /*
 Using the serial algorithms described at https://chessprogramming.wikispaces.com/BMI2
 */
-CUDA_CALLABLE_MEMBER_DEVICE uint64_t _pdep_u64(uint64_t src, uint64_t mask) {
+CUDA_CALLABLE_MEMBER_DEVICE uint64_t _cu_pdep_u64(uint64_t src, uint64_t mask) {
 	uint64_t res = 0;
 	for (uint64_t bb = 1; mask; bb += bb) {
-		if (val & bb) res |= mask & -mask;
+		if (src & bb) res |= mask & -mask;
 		mask &= mask - 1;
 	}
 	return res;
 }
 
-CUDA_CALLABLE_MEMBER_DEVICE uint64_t _pext_u64(uint64_t src, uint64_t mask) {
-	__local__ uint64_t res = 0;
+CUDA_CALLABLE_MEMBER_DEVICE uint64_t _cu_pext_u64(uint64_t src, uint64_t mask) {
+	uint64_t res = 0;
 	for (uint64_t bb = 1; mask; bb += bb) {
-		if ( val & mask & -mask ) res |= bb;
+		if ( src & mask & -mask ) res |= bb;
 		mask &= mask - 1;
 	}
 	return res;
@@ -123,8 +123,7 @@ const uint64_t xz3_mask = x3_mask | z3_mask;
 const uint64_t yz3_mask = y3_mask | z3_mask;
 
 template<class T = uint64_t>
-class morton3d
-{
+class morton3d {
 public:
 	T key;
 
@@ -135,9 +134,11 @@ public:
 
 	/* If BMI2 intrinsics are not available, we rely on a look up table of precomputed morton codes.
 	Ref : http://www.forceflow.be/2013/10/07/morton-encodingdecoding-through-bit-interleaving-implementations/ */
-	CUDA_CALLABLE_MEMBER_HOST inline morton3d(const uint32_t x, const uint32_t y, const uint32_t z) : key(0) {
-		#ifdef USE_BMI2
+	CUDA_CALLABLE_MEMBER inline morton3d(const uint32_t x, const uint32_t y, const uint32_t z) : key(0) {
+		#ifdef USE_BMI2 
 		key = static_cast<T>(_pdep_u64(z, z3_mask) | _pdep_u64(y, y3_mask) | _pdep_u64(x, x3_mask));
+		#elif __CUDA_ARCH__
+		key = static_cast<T>(_cu_pdep_u64(z, z3_mask) | _cu_pdep_u64(y, y3_mask) | _cu_pdep_u64(x, x3_mask));
 		#else
 		key = morton3dLUT[(x >> 16) & 0xFF] << 2 |
 			morton3dLUT[(y >> 16) & 0xFF] << 1 |
@@ -152,34 +153,23 @@ public:
 			morton3dLUT[z & 0xFF];
 		#endif
 	}
-	
-	#ifdef __CUDACC__
-	CUDA_CALLABLE_MEMBER_DEVICE inline morton3d(const uint32_t x, const uint32_t y, const uint32_t z) : key(0) {
-		key = static_cast<T>(_pdep_u64(z, z3_mask) | _pdep_u64(y, y3_mask) | _pdep_u64(x, x3_mask));
-	}
-	#endif
 
-	CUDA_CALLABLE_MEMBER_HOST inline void decode(uint64_t& x, uint64_t& y, uint64_t& z) const
+	CUDA_CALLABLE_MEMBER inline void decode(uint64_t& x, uint64_t& y, uint64_t& z) const
 	{
 		#ifdef USE_BMI2
 		x = _pext_u64(this->key, x3_mask);
 		y = _pext_u64(this->key, y3_mask);
 		z = _pext_u64(this->key, z3_mask);
+		#elif __CUDA_ARCH__
+		x = _cu_pext_u64(this->key, x3_mask);
+		y = _cu_pext_u64(this->key, y3_mask);
+		z = _cu_pext_u64(this->key, z3_mask);
 		#else
 		x = compactBits(this->key >> 2);
 		y = compactBits(this->key >> 1);
 		z = compactBits(this->key);
 		#endif
 	}
-
-	#ifdef __CUDACC__
-	CUDA_CALLABLE_MEMBER_DEVICE inline void decode(uint64_t& x, uint64_t& y, uint64_t& z) const
-	{
-		x = _pext_u64(this->key, x3_mask);
-		y = _pext_u64(this->key, y3_mask);
-		z = _pext_u64(this->key, z3_mask);
-	}
-	#endif
 
 	//Binary operators
 	CUDA_CALLABLE_MEMBER inline bool operator==(const morton3d m1) const
